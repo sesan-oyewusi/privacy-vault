@@ -186,3 +186,101 @@
         total-amount: initial-amount,
         participant-count: u1,
         is-active: true,
+        participants: (list tx-sender),
+        pool-creator: tx-sender,
+      })
+
+      (map-set pool-participant-status {
+        pool-id: pool-id,
+        user: tx-sender,
+      }
+        true
+      )
+
+      (map-set user-balances tx-sender (- user-balance initial-amount))
+
+      (ok true)
+    )
+  )
+)
+
+;; Join an existing privacy pool with contribution
+(define-public (join-mixer-pool
+    (pool-id uint)
+    (amount uint)
+  )
+  (begin
+    (asserts! (var-get is-contract-initialized) ERR-CONTRACT-NOT-INITIALIZED)
+    (asserts! (not (var-get is-contract-paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (>= amount MIN-POOL-AMOUNT) ERR-INVALID-AMOUNT)
+
+    (let (
+        (pool (unwrap! (map-get? mixer-pools pool-id) ERR-INVALID-POOL))
+        (user-balance (default-to u0 (map-get? user-balances tx-sender)))
+      )
+      (asserts! (get is-active pool) ERR-INVALID-POOL)
+      (asserts! (< (get participant-count pool) MAX-POOL-PARTICIPANTS)
+        ERR-POOL-FULL
+      )
+      (asserts! (>= user-balance amount) ERR-INSUFFICIENT-BALANCE)
+      (asserts!
+        (is-none (map-get? pool-participant-status {
+          pool-id: pool-id,
+          user: tx-sender,
+        }))
+        ERR-DUPLICATE-PARTICIPANT
+      )
+
+      (map-set mixer-pools pool-id {
+        total-amount: (+ (get total-amount pool) amount),
+        participant-count: (+ (get participant-count pool) u1),
+        is-active: true,
+        participants: (unwrap! (as-max-len? (append (get participants pool) tx-sender) u10)
+          ERR-POOL-FULL
+        ),
+        pool-creator: (get pool-creator pool),
+      })
+
+      (map-set pool-participant-status {
+        pool-id: pool-id,
+        user: tx-sender,
+      }
+        true
+      )
+
+      (map-set user-balances tx-sender (- user-balance amount))
+
+      (ok true)
+    )
+  )
+)
+
+;; Execute privacy pool distribution with protocol fee collection
+(define-public (distribute-pool-funds (pool-id uint))
+  (let (
+      (pool (unwrap! (map-get? mixer-pools pool-id) ERR-INVALID-POOL))
+      (participants (get participants pool))
+      (total-pool-amount (get total-amount pool))
+      (participant-count (get participant-count pool))
+    )
+    (asserts! (get is-active pool) ERR-POOL-NOT-READY)
+    (asserts! (is-eq participant-count (len participants)) ERR-POOL-NOT-READY)
+
+    (let (
+        (mixing-fee (/ (* total-pool-amount MIXING-FEE-PERCENTAGE) u100))
+        (distributable-amount (- total-pool-amount mixing-fee))
+        (per-participant (/ distributable-amount participant-count))
+      )
+      ;; Accumulate protocol fees
+      (var-set total-protocol-fees (+ (var-get total-protocol-fees) mixing-fee))
+
+      ;; Execute fund distribution
+      (try! (fold distribute-to-participant participants (ok u0)))
+
+      ;; Deactivate completed pool
+      (map-set mixer-pools pool-id (merge pool { is-active: false }))
+
+      (ok true)
+    )
+  )
+)
