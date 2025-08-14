@@ -284,3 +284,85 @@
     )
   )
 )
+
+;; Emergency protocol pause toggle (Owner only)
+(define-public (toggle-contract-pause)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (var-set is-contract-paused (not (var-get is-contract-paused)))
+    (ok (var-get is-contract-paused))
+  )
+)
+
+;; Protocol fee withdrawal (Owner only)
+(define-public (withdraw-protocol-fees)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (let ((fees (var-get total-protocol-fees)))
+      (try! (as-contract (stx-transfer? fees (as-contract tx-sender) CONTRACT-OWNER)))
+      (var-set total-protocol-fees u0)
+      (ok fees)
+    )
+  )
+)
+
+;; READ-ONLY FUNCTIONS
+
+;; Get user's current balance
+(define-read-only (get-user-balance (user principal))
+  (default-to u0 (map-get? user-balances user))
+)
+
+;; Calculate remaining daily transaction limit
+(define-read-only (get-daily-limit-remaining (user principal))
+  (let (
+      (current-day (/ stacks-block-height u144))
+      (current-total (default-to u0
+        (map-get? daily-tx-totals {
+          user: user,
+          day: current-day,
+        })
+      ))
+    )
+    (- MAX-DAILY-LIMIT current-total)
+  )
+)
+
+;; Get protocol status information
+(define-read-only (get-contract-status)
+  {
+    is-paused: (var-get is-contract-paused),
+    is-initialized: (var-get is-contract-initialized),
+    total-protocol-fees: (var-get total-protocol-fees),
+  }
+)
+
+;; Retrieve privacy pool details
+(define-read-only (get-pool-details (pool-id uint))
+  (map-get? mixer-pools pool-id)
+)
+
+;; PRIVATE HELPER FUNCTIONS
+
+;; Distribution helper for pool fund allocation
+(define-private (distribute-to-participant
+    (participant principal)
+    (previous-result (response uint uint))
+  )
+  (match previous-result
+    prev-value (let ((per-participant (/
+        (- (get total-amount (unwrap-panic (map-get? mixer-pools u0)))
+          (/
+            (* (get total-amount (unwrap-panic (map-get? mixer-pools u0)))
+              MIXING-FEE-PERCENTAGE
+            )
+            u100
+          ))
+        (get participant-count (unwrap-panic (map-get? mixer-pools u0)))
+      )))
+      (try! (as-contract (stx-transfer? per-participant (as-contract tx-sender) participant)))
+      (ok (+ prev-value per-participant))
+    )
+    err-value (err err-value)
+  )
+)
