@@ -85,3 +85,104 @@
     (ok true)
   )
 )
+
+;; Secure fund deposit with rate limiting
+(define-public (deposit (amount uint))
+  (begin
+    (asserts! (var-get is-contract-initialized) ERR-CONTRACT-NOT-INITIALIZED)
+    (asserts! (not (var-get is-contract-paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (> amount u0) (<= amount MAX-TRANSACTION-AMOUNT))
+      ERR-INVALID-AMOUNT
+    )
+
+    (let (
+        (current-day (/ stacks-block-height u144))
+        (current-total (default-to u0
+          (map-get? daily-tx-totals {
+            user: tx-sender,
+            day: current-day,
+          })
+        ))
+      )
+      (asserts! (<= (+ current-total amount) MAX-DAILY-LIMIT)
+        ERR-DAILY-LIMIT-EXCEEDED
+      )
+
+      (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+
+      (map-set user-balances tx-sender
+        (+ (default-to u0 (map-get? user-balances tx-sender)) amount)
+      )
+
+      (map-set daily-tx-totals {
+        user: tx-sender,
+        day: current-day,
+      }
+        (+ current-total amount)
+      )
+
+      (ok true)
+    )
+  )
+)
+
+;; Secure fund withdrawal with verification
+(define-public (withdraw (amount uint))
+  (begin
+    (asserts! (var-get is-contract-initialized) ERR-CONTRACT-NOT-INITIALIZED)
+    (asserts! (not (var-get is-contract-paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (and (> amount u0) (<= amount MAX-TRANSACTION-AMOUNT))
+      ERR-INVALID-AMOUNT
+    )
+
+    (let (
+        (current-balance (default-to u0 (map-get? user-balances tx-sender)))
+        (current-day (/ stacks-block-height u144))
+        (current-total (default-to u0
+          (map-get? daily-tx-totals {
+            user: tx-sender,
+            day: current-day,
+          })
+        ))
+      )
+      (asserts! (>= current-balance amount) ERR-INSUFFICIENT-BALANCE)
+      (asserts! (<= (+ current-total amount) MAX-DAILY-LIMIT)
+        ERR-DAILY-LIMIT-EXCEEDED
+      )
+
+      (map-set user-balances tx-sender (- current-balance amount))
+
+      (map-set daily-tx-totals {
+        user: tx-sender,
+        day: current-day,
+      }
+        (+ current-total amount)
+      )
+
+      (try! (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender)))
+
+      (ok true)
+    )
+  )
+)
+
+;; Create a new privacy pool with initial funding
+(define-public (create-mixer-pool
+    (pool-id uint)
+    (initial-amount uint)
+  )
+  (begin
+    (asserts! (var-get is-contract-initialized) ERR-CONTRACT-NOT-INITIALIZED)
+    (asserts! (not (var-get is-contract-paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (>= initial-amount MIN-POOL-AMOUNT) ERR-INVALID-AMOUNT)
+
+    (asserts! (< pool-id u1000) ERR-INVALID-POOL)
+    (asserts! (is-none (map-get? mixer-pools pool-id)) ERR-INVALID-POOL)
+
+    (let ((user-balance (default-to u0 (map-get? user-balances tx-sender))))
+      (asserts! (>= user-balance initial-amount) ERR-INSUFFICIENT-BALANCE)
+
+      (map-set mixer-pools pool-id {
+        total-amount: initial-amount,
+        participant-count: u1,
+        is-active: true,
